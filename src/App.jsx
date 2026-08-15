@@ -162,7 +162,22 @@ export default function App() {
       return;
     }
 
+    // 徴兵：兵役人口0または金0なら実行不可
+    if (cmd.isConscription) {
+      if (city.heiyaku <= 0) {
+        showToast("兵役人口が不足しています", "warn");
+        setSelCmd(null);
+        return;
+      }
+      if (gold <= 0) {
+        showToast("金が不足しています", "warn");
+        setSelCmd(null);
+        return;
+      }
+    }
+
     let lines = [];
+    let totalGoldUsed = 0;
     setCities(prev => {
       const next = JSON.parse(JSON.stringify(prev));
       const c = next[selCityId];
@@ -170,19 +185,22 @@ export default function App() {
         const o = officers[oid];
         const { gain, popCost, goldCost } = calcGain(cmd, o, c);
         if (cmd.isConscription) {
-          const ratio = Math.min(1, c.heiyaku / (o.touritsu * 30), gold / (o.touritsu * 3));
+          // 金・兵役人口の残量内に収まるよう比率で縮小
+          const ratio = Math.min(1,
+            c.heiyaku > 0 ? c.heiyaku / popCost : 0,
+            gold > 0 ? gold / goldCost : 0
+          );
           const actualGain = Math.floor(gain * ratio);
           const actualPop  = Math.floor(popCost * ratio);
-          const actualGold = Math.floor((o.touritsu * 3) * ratio);
+          const actualGold = Math.floor(goldCost * ratio);
           c.heiryoku += actualGain;
-          c.heiyaku  -= actualPop;
-          setGold(g => Math.max(0, g - actualGold));
+          c.heiyaku   = Math.max(0, c.heiyaku - actualPop);
+          totalGoldUsed += actualGold;
           lines.push(`${o.name}：兵力+${fmt(actualGain)}（兵役人口-${fmt(actualPop)} 金-${fmt(actualGold)}）`);
         } else {
           const max    = c[cmd.statMax];
           const before = c[cmd.stat];
           const room   = max - before;
-          // 上限に近いほど上昇量を抑制（線形補正：仮）
           const suppressed = Math.floor(gain * room / max);
           const amount = Math.max(0, Math.min(gain, suppressed + 1));
           c[cmd.stat] = Math.min(max, before + amount);
@@ -192,7 +210,12 @@ export default function App() {
       return next;
     });
 
-    if (!cmd.isConscription && totalCost > 0) setGold(g => Math.max(0, g - totalCost));
+    if (cmd.isConscription && totalGoldUsed > 0) {
+      setGold(g => Math.max(0, g - totalGoldUsed));
+    }
+    if (!cmd.isConscription && totalCost > 0) {
+      setGold(g => Math.max(0, g - totalCost));
+    }
 
     const resultLines = lines;
     const note = !cmd.isConscription && totalCost > 0 ? `金 -${fmt(totalCost)}（${selOIds.length}人×${fmt(cmd.cost)}）` : "";
@@ -214,16 +237,22 @@ export default function App() {
       let nextYear  = year;
       if (nextPIdx > 2) { nextPIdx = 0; nextMonth = month < 12 ? month + 1 : 1; if (nextMonth === 1) nextYear = year + 1; }
 
+      // 兵糧は毎旬消費（兵力100につき兵糧1／旬）
+      const upkeepPerPeriod = Object.values(cities)
+        .filter(c => c.faction === PLAYER_FACTION)
+        .reduce((s, c) => s + Math.floor(c.heiryoku / 100), 0);
+      setFood(f => Math.max(0, f - upkeepPerPeriod));
+
+      // 月末のみ：金収入・兵糧収穫
       if (pIdx === 2) {
         if (GOLD_MONTHS.includes(nextMonth)) {
           const inc = Object.values(cities).filter(c => c.faction === PLAYER_FACTION).reduce((s, c) => s + c.shueki, 0);
           setGold(g => g + inc);
         }
-        const harvest = nextMonth === 7
-          ? Object.values(cities).filter(c => c.faction === PLAYER_FACTION).reduce((s, c) => s + c.shuukaku, 0)
-          : 0;
-        const up = Object.values(cities).filter(c => c.faction === PLAYER_FACTION).reduce((s, c) => s + Math.floor(c.heiryoku / 100), 0);
-        setFood(f => Math.max(0, f + harvest - up));
+        if (nextMonth === 7) {
+          const harvest = Object.values(cities).filter(c => c.faction === PLAYER_FACTION).reduce((s, c) => s + c.shuukaku, 0);
+          setFood(f => f + harvest);
+        }
       }
 
       setPIdx(nextPIdx);
@@ -354,8 +383,12 @@ export default function App() {
             <div className="m-cmd-grid">
               {COMMANDS.map(cmd => {
                 const totalCost = cmd.isConscription ? 0 : cmd.cost * selOIds.length;
-                const disabled  = !cmd.isConscription && gold < totalCost;
-                const costLabel = cmd.isConscription ? "兵役人口" : totalCost > 0 ? `金${fmt(totalCost)}` : "無料";
+                const disabled = cmd.isConscription
+                  ? city.heiyaku <= 0 || gold <= 0
+                  : gold < totalCost;
+                const costLabel = cmd.isConscription
+                  ? city.heiyaku <= 0 ? "兵役人口なし" : gold <= 0 ? "金不足" : "兵役人口消費"
+                  : totalCost > 0 ? `金${fmt(totalCost)}` : "無料";
                 return (
                   <button key={cmd.id} className={`m-cmd ${disabled?"disabled":""}`} disabled={disabled} onClick={()=>chooseCmd(cmd)}>
                     <span className="m-cmd-icon">{cmd.icon}</span>
